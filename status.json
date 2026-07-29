@@ -1,21 +1,31 @@
 {
-  "updated_at_utc": "2026-07-29T10:26:19.343182+00:00",
+  "updated_at_utc": "2026-07-29T10:59:11.435305+00:00",
   "source": "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/BLACK_VLESS_RUS_mobile.txt",
   "upstream_vless": 122,
   "resolved_ipv4": 122,
-  "tcp_reachable_from_github": 121,
-  "europe_selected": 20,
+  "currently_reachable": 120,
+  "current_europe": 21,
+  "historical_reserve": 0,
   "country_counts": {
-    "FI": 1,
-    "EE": 1,
-    "LV": 1,
-    "DE": 6,
+    "FI": 0,
+    "EE": 0,
+    "LV": 3,
+    "DE": 1,
     "NL": 8,
-    "PL": 2,
-    "SE": 1
+    "PL": 7,
+    "SE": 2
   },
   "mobile_nodes": 12,
-  "full_nodes": 20,
-  "backup_nodes": 30,
-  "note": "TCP reachability is measured from GitHub Actions, not from the user's network."
+  "full_nodes": 21,
+  "backup_nodes": 0,
+  "probe_policy": {
+    "attempts_per_node": 3,
+    "minimum_successes": 2,
+    "timeout_seconds": 2.5
+  },
+  "history_policy": {
+    "checks_per_node": 12,
+    "retention_days": 30
+  },
+  "note": "Задержка измеряется от GitHub Actions, а не от сети пользователя. mobile.txt содержит только узлы, прошедшие текущую проверку."
 }
