@@ -6,167 +6,251 @@ import concurrent.futures
 import ipaddress
 import json
 import socket
-import time
 import urllib.parse
 import urllib.request
+from collections import defaultdict
 from pathlib import Path
 
-SOURCE = (
-    "https://raw.githubusercontent.com/igareck/"
-    "vpn-configs-for-russia/refs/heads/main/BLACK_VLESS_RUS_mobile.txt"
-)
-TARGET_COUNTRIES = ("FI", "EE", "LV", "DE", "NL", "PL", "SE")
+# Один проверяемый upstream и несколько его официальных зеркал.
+# Это надежнее, чем смешивать случайные публичные сборники без проверки.
+SOURCES = [
+    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/BLACK_VLESS_RUS_mobile.txt",
+    "https://gitlab.com/igareck/vpn-configs-for-russia/-/raw/main/BLACK_VLESS_RUS_mobile.txt",
+    "https://codeberg.org/igareck/vpn-configs-for-russia/raw/branch/main/BLACK_VLESS_RUS_mobile.txt",
+    "https://gitea.com/igareck/vpn-configs-for-russia/raw/branch/main/BLACK_VLESS_RUS_mobile.txt",
+    "https://bitbucket.org/igareck/vpn-configs-for-russia/raw/main/BLACK_VLESS_RUS_mobile.txt",
+    "https://raw.githack.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS_mobile.txt",
+]
+
+COUNTRY_ORDER = ("FI", "EE", "LV", "DE", "NL", "PL", "SE")
 COUNTRY_NAMES = {
-    "FI": "Finland",
-    "EE": "Estonia",
-    "LV": "Latvia",
-    "DE": "Germany",
-    "NL": "Netherlands",
-    "PL": "Poland",
-    "SE": "Sweden",
+    "FI": "Finland", "EE": "Estonia", "LV": "Latvia",
+    "DE": "Germany", "NL": "Netherlands", "PL": "Poland", "SE": "Sweden",
 }
-USER_AGENT = "incy-sub-updater/1.0"
+MOBILE_LIMIT = 12
+FULL_LIMIT = 50
+BACKUP_LIMIT = 30
+UA = "buda1969/incy-sub updater"
 
 
-def download_text(url: str) -> str:
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(request, timeout=30) as response:
-        return response.read().decode("utf-8", errors="replace")
+def fetch(url: str, timeout: int = 30) -> str:
+    req = urllib.request.Request(url, headers={"User-Agent": UA})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", errors="replace")
 
 
-def normalize_subscription(text: str) -> list[str]:
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    configs = [line for line in lines if line.startswith("vless://")]
-    if configs:
-        return configs
+def get_source() -> tuple[str, str]:
+    errors = []
+    for url in SOURCES:
+        try:
+            text = fetch(url)
+            if "vless://" in text or len(text.strip()) > 100:
+                return text, url
+        except Exception as exc:
+            errors.append(f"{url}: {exc}")
+    raise RuntimeError("Все зеркала upstream недоступны:\n" + "\n".join(errors))
 
-    compact = "".join(lines)
+
+def decode_lines(text: str) -> list[str]:
+    raw = [x.strip() for x in text.splitlines() if x.strip()]
+    direct = [x for x in raw if x.startswith("vless://")]
+    if direct:
+        return direct
+
+    compact = "".join(raw)
+    for decoder in (base64.b64decode, base64.urlsafe_b64decode):
+        try:
+            padded = compact + "=" * (-len(compact) % 4)
+            decoded = decoder(padded).decode("utf-8", errors="replace")
+            found = [
+                x.strip() for x in decoded.splitlines()
+                if x.strip().startswith("vless://")
+            ]
+            if found:
+                return found
+        except Exception:
+            pass
+    return []
+
+
+def endpoint(uri: str) -> tuple[str, int] | None:
     try:
-        compact += "=" * (-len(compact) % 4)
-        decoded = base64.b64decode(compact).decode("utf-8", errors="replace")
-        return [
-            line.strip()
-            for line in decoded.splitlines()
-            if line.strip().startswith("vless://")
-        ]
-    except Exception:
-        return []
-
-
-def host_from_vless(uri: str) -> str | None:
-    try:
-        parsed = urllib.parse.urlsplit(uri)
-        return parsed.hostname
+        p = urllib.parse.urlsplit(uri)
+        if p.scheme != "vless" or not p.hostname or not p.port:
+            return None
+        return p.hostname, p.port
     except Exception:
         return None
 
 
-def resolve_host(host: str) -> str | None:
+def resolve_ipv4(host: str) -> str | None:
     try:
-        ipaddress.ip_address(host)
-        return host
+        ip = ipaddress.ip_address(host)
+        return str(ip) if ip.version == 4 else None
     except ValueError:
         pass
-
     try:
-        results = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
-        for result in results:
-            candidate = result[4][0]
-            try:
-                if ipaddress.ip_address(candidate).version == 4:
-                    return candidate
-            except ValueError:
-                continue
-        return results[0][4][0] if results else None
+        for info in socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_STREAM):
+            return info[4][0]
+    except OSError:
+        return None
+    return None
+
+
+def tcp_probe(host: str, port: int, timeout: float = 2.5) -> float | None:
+    import time
+    start = time.monotonic()
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return round((time.monotonic() - start) * 1000, 1)
     except OSError:
         return None
 
 
-def geolocate_ip(ip: str) -> tuple[str | None, str | None]:
-    # Бесплатный API без ключа. При временном отказе узел просто пропускается.
-    url = f"https://ipwho.is/{urllib.parse.quote(ip)}?fields=success,country_code,city"
-    try:
-        data = json.loads(download_text(url))
-        if data.get("success"):
-            return data.get("country_code"), data.get("city")
-    except Exception:
-        pass
-    return None, None
+def geo_batch(ips: list[str]) -> dict[str, tuple[str | None, str | None]]:
+    """Batch lookup. If unavailable, return unknowns without destroying old files."""
+    result = {ip: (None, None) for ip in ips}
+    if not ips:
+        return result
 
-
-def classify(uri: str) -> tuple[str, str | None, str | None]:
-    host = host_from_vless(uri)
-    if not host:
-        return uri, None, None
-    ip = resolve_host(host)
-    if not ip:
-        return uri, None, None
-    country, city = geolocate_ip(ip)
-    return uri, country, city
-
-
-def rename(uri: str, country: str, city: str | None, index: int) -> str:
-    parsed = urllib.parse.urlsplit(uri)
-    label = f"{COUNTRY_NAMES.get(country, country)}"
-    if city:
-        label += f" {city}"
-    label += f" #{index:02d}"
-    return urllib.parse.urlunsplit(
-        (parsed.scheme, parsed.netloc, parsed.path, parsed.query,
-         urllib.parse.quote(label, safe=" "))
-    )
-
-
-def deduplicate(configs: list[str]) -> list[str]:
-    seen: set[tuple[str | None, int | None, str]] = set()
-    result: list[str] = []
-    for uri in configs:
-        parsed = urllib.parse.urlsplit(uri)
-        key = (parsed.hostname, parsed.port, parsed.query)
-        if key not in seen:
-            seen.add(key)
-            result.append(uri)
+    # ip-api accepts max 100 records per request.
+    for start in range(0, len(ips), 100):
+        chunk = ips[start:start + 100]
+        payload = json.dumps([
+            {"query": ip, "fields": "status,countryCode,city,query"} for ip in chunk
+        ]).encode()
+        req = urllib.request.Request(
+            "http://ip-api.com/batch",
+            data=payload,
+            headers={"Content-Type": "application/json", "User-Agent": UA},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read().decode())
+            for row in data:
+                ip = row.get("query")
+                if ip in result and row.get("status") == "success":
+                    result[ip] = (row.get("countryCode"), row.get("city"))
+        except Exception as exc:
+            print(f"WARNING: геолокация недоступна: {exc}")
     return result
 
 
-def write_file(path: str, configs: list[str]) -> None:
-    Path(path).write_text("\n".join(configs) + ("\n" if configs else ""), encoding="utf-8")
+def fingerprint(uri: str) -> tuple:
+    p = urllib.parse.urlsplit(uri)
+    q = urllib.parse.parse_qsl(p.query, keep_blank_values=True)
+    # Fragment/name intentionally excluded.
+    return (p.username, p.hostname, p.port, tuple(sorted(q)))
+
+
+def rename(uri: str, country: str, city: str | None, latency: float, idx: int) -> str:
+    p = urllib.parse.urlsplit(uri)
+    place = COUNTRY_NAMES.get(country, country)
+    if city:
+        place += f" {city}"
+    label = f"{place} · {latency:.0f}ms · #{idx:02d}"
+    return urllib.parse.urlunsplit(
+        (p.scheme, p.netloc, p.path, p.query, urllib.parse.quote(label, safe=" ·#"))
+    )
+
+
+def write_atomic(path: str, configs: list[str]) -> None:
+    if not configs:
+        raise RuntimeError(f"Отказ обновления {path}: итоговый список пуст.")
+    target = Path(path)
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    tmp.write_text("\n".join(configs) + "\n", encoding="utf-8")
+    tmp.replace(target)
 
 
 def main() -> None:
-    configs = deduplicate(normalize_subscription(download_text(SOURCE)))
+    text, source = get_source()
+    print(f"Используется зеркало: {source}")
+
+    configs = decode_lines(text)
+    unique = {}
+    for uri in configs:
+        ep = endpoint(uri)
+        if ep:
+            unique.setdefault(fingerprint(uri), uri)
+    configs = list(unique.values())
     if not configs:
-        raise RuntimeError("В исходной подписке не найдено ни одной VLESS-конфигурации.")
+        raise RuntimeError("В upstream не найдено корректных VLESS URI.")
 
-    selected: list[tuple[str, str, str | None]] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-        futures = [executor.submit(classify, uri) for uri in configs]
-        for future in concurrent.futures.as_completed(futures):
-            uri, country, city = future.result()
-            if country in set(TARGET_COUNTRIES):
-                selected.append((uri, country, city))
-            time.sleep(0.03)
+    resolved = {}
+    for uri in configs:
+        host, port = endpoint(uri)  # type: ignore[misc]
+        ip = resolve_ipv4(host)
+        if ip:
+            resolved[uri] = (host, port, ip)
 
-    if not selected:
+    probe_results = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=24) as pool:
+        future_map = {
+            pool.submit(tcp_probe, host, port): uri
+            for uri, (host, port, _ip) in resolved.items()
+        }
+        for future in concurrent.futures.as_completed(future_map):
+            uri = future_map[future]
+            latency = future.result()
+            if latency is not None:
+                probe_results[uri] = latency
+
+    ips = sorted({resolved[uri][2] for uri in probe_results})
+    geo = geo_batch(ips)
+
+    selected = []
+    fallback = []
+    for uri, latency in probe_results.items():
+        ip = resolved[uri][2]
+        country, city = geo.get(ip, (None, None))
+        row = (uri, country, city, latency)
+        if country in COUNTRY_ORDER:
+            selected.append(row)
+        else:
+            fallback.append(row)
+
+    selected.sort(key=lambda x: (
+        COUNTRY_ORDER.index(x[1]), x[3], x[2] or "", x[0]  # type: ignore[arg-type]
+    ))
+    fallback.sort(key=lambda x: (x[3], x[0]))
+
+    # Не перезаписываем рабочие файлы пустым результатом при сбое геолокации.
+    if len(selected) < 5:
         raise RuntimeError(
-            "Не удалось определить европейские узлы. "
-            "Старые файлы подписки оставлены без изменений."
+            f"Найдено только {len(selected)} европейских узлов. "
+            "Старые subscription-файлы сохранены без изменений."
         )
 
-    selected.sort(key=lambda item: (
-        TARGET_COUNTRIES.index(item[1])
-        if item[1] in set(TARGET_COUNTRIES) else 999,
-        item[2] or "",
-        item[0],
-    ))
-
-    renamed = [
-        rename(uri, country, city, index)
-        for index, (uri, country, city) in enumerate(selected, start=1)
+    named = [
+        rename(uri, country, city, latency, i)
+        for i, (uri, country, city, latency) in enumerate(selected, 1)
     ]
-    write_file("mobile.txt", renamed[:12])
-    write_file("full.txt", renamed[:50])
-    print(f"Готово: mobile={min(len(renamed), 12)}, full={min(len(renamed), 50)}")
+    backup = [
+        rename(uri, country or "Other", city, latency, i)
+        for i, (uri, country, city, latency) in enumerate(fallback, 1)
+    ]
+
+    write_atomic("mobile.txt", named[:MOBILE_LIMIT])
+    write_atomic("full.txt", named[:FULL_LIMIT])
+    if backup:
+        write_atomic("backup.txt", backup[:BACKUP_LIMIT])
+
+    status = {
+        "source": source,
+        "upstream_vless": len(configs),
+        "tcp_reachable": len(probe_results),
+        "europe_selected": len(selected),
+        "mobile": min(len(named), MOBILE_LIMIT),
+        "full": min(len(named), FULL_LIMIT),
+        "backup": min(len(backup), BACKUP_LIMIT),
+    }
+    Path("status.json").write_text(
+        json.dumps(status, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    print(json.dumps(status, ensure_ascii=False))
 
 
 if __name__ == "__main__":
