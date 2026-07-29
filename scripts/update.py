@@ -187,18 +187,34 @@ def rename(
     success_rate: float,
 ) -> str:
     parsed = urllib.parse.urlsplit(uri)
+
     place = COUNTRY_NAMES.get(country, country)
+
     if city:
-        place += f" {city}"
+        safe_city = "".join(
+            ch if ch.isascii() and (ch.isalnum() or ch in " -_")
+            else "-"
+            for ch in city
+        )
+        safe_city = " ".join(safe_city.split())
+        if safe_city:
+            place += f" {safe_city}"
+
     quality = round(success_rate * 100)
-    label = f"{place} #{index:02d} • {quality}%"
+    label = f"{place} {index:02d} stable-{quality}"
+
+    encoded_label = urllib.parse.quote(
+        label,
+        safe="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_ "
+    )
+
     return urllib.parse.urlunsplit(
         (
             parsed.scheme,
             parsed.netloc,
             parsed.path,
             parsed.query,
-            urllib.parse.quote(label, safe=" #•%"),
+            encoded_label,
         )
     )
 
