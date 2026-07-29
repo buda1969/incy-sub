@@ -41,11 +41,13 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+          git pull --rebase origin main
+
           git add mobile.txt full.txt backup.txt status.json
 
           if git diff --cached --quiet; then
             echo "Изменений нет"
           else
             git commit -m "Update INCY subscriptions"
-            git push
+            git push origin main
           fi
