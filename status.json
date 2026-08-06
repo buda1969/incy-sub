@@ -1,22 +1,22 @@
 {
-  "updated_at_utc": "2026-08-05T19:58:11.904312+00:00",
+  "updated_at_utc": "2026-08-06T03:43:23.380184+00:00",
   "source": "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/BLACK_VLESS_RUS_mobile.txt",
-  "upstream_vless": 128,
-  "resolved_ipv4": 128,
-  "currently_reachable": 126,
-  "current_europe": 36,
+  "upstream_vless": 141,
+  "resolved_ipv4": 141,
+  "currently_reachable": 140,
+  "current_europe": 64,
   "historical_reserve": 0,
   "country_counts": {
     "FI": 0,
-    "EE": 0,
+    "EE": 2,
     "LV": 14,
-    "DE": 11,
-    "NL": 6,
+    "DE": 31,
+    "NL": 4,
     "PL": 0,
-    "SE": 5
+    "SE": 13
   },
   "mobile_nodes": 12,
-  "full_nodes": 36,
+  "full_nodes": 50,
   "backup_nodes": 0,
   "probe_policy": {
     "attempts_per_node": 3,
